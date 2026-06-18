@@ -331,8 +331,11 @@ body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background:
         <div id="p-state-host" style="display:none;flex-direction:column;align-items:center;gap:20px;">
           <div style="font-size:48px;">🎵</div>
           <div style="font-size:18px;font-weight:800;color:var(--text);" id="p-tap-title">あなたの曲</div>
+          <button id="host-unlock-btn" onclick="guestPreUnlock()" style="display:none;padding:10px 20px;background:rgba(255,45,120,0.12);color:var(--pink);border:1.5px solid rgba(255,45,120,0.35);border-radius:10px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:4px;">
+            🔊 iPhoneの方はまずここをタップ（音声準備）
+          </button>
           <button onclick="tapToPlay()" style="padding:18px 48px;background:linear-gradient(135deg,var(--purple),#6d28d9);color:#fff;border:none;border-radius:16px;font-size:18px;font-weight:800;cursor:pointer;box-shadow:0 8px 32px var(--purple-glow);">▶️ 再生する</button>
-          <div style="font-size:12px;color:var(--text3);text-align:center;">押すと全員同時にカウントダウンが始まります</div>
+          <div style="font-size:12px;color:var(--text3);text-align:center;">押すと全員同時に再生が始まります</div>
         </div>
         <!-- ② ゲスト：ホスト待機画面 -->
         <div id="p-state-guest" style="display:none;flex-direction:column;align-items:center;gap:16px;">
@@ -684,6 +687,7 @@ async function doJoin(){
 
 /* ============ LOBBY ============ */
 async function openLobby(){
+  console.log('openLobby called, roomId:', G.roomId, 'roomDbId:', G.roomDbId);
   renderCodeChars(G.roomId);
   await fetchMembers();
   renderTrackOpts();
@@ -1005,10 +1009,21 @@ function startPlaying(){
   show('s-playing');
 
   G_musicAlreadyStarted=false;
+  const isIOS=/iPad|iPhone|iPod/.test(navigator.userAgent)&&!window.MSStream;
+
   if(G.isHost){
     showOverlayState('host');
+    // iOS未解除なら再生ボタンの下に解除ボタンも出す
+    const hostUnlockBtn=document.getElementById('host-unlock-btn');
+    if(hostUnlockBtn)hostUnlockBtn.style.display=(isIOS&&!window._unlockedAudioEl)?'block':'none';
   } else {
     showOverlayState('guest');
+    const guestBtn=document.getElementById('guest-unlock-btn');
+    if(guestBtn){
+      guestBtn.style.display=isIOS?'block':'none';
+      guestBtn.textContent='🔊 iPhoneの方はここをタップ（音声準備）';
+      guestBtn.disabled=false;
+    }
     waitForHostPlay();
   }
 }
@@ -1051,12 +1066,16 @@ function guestPreUnlock(){
         audioEl.currentTime=0;
         window._unlockedAudioEl=audioEl;
         console.log('guestPreUnlock: audio element unlocked successfully');
-        const btn=document.getElementById('guest-unlock-btn');
-        if(btn){btn.textContent='✅ 準備完了！';btn.disabled=true;}
+        ['guest-unlock-btn','host-unlock-btn'].forEach(id=>{
+          const btn=document.getElementById(id);
+          if(btn){btn.textContent='✅ 準備完了！';btn.disabled=true;}
+        });
       }).catch(e=>{
         console.warn('guestPreUnlock play failed',e);
-        const btn=document.getElementById('guest-unlock-btn');
-        if(btn)btn.textContent='⚠️ もう一度タップしてください';
+        ['guest-unlock-btn','host-unlock-btn'].forEach(id=>{
+          const btn=document.getElementById(id);
+          if(btn)btn.textContent='⚠️ もう一度タップしてください';
+        });
       });
     }
   }catch(e){console.warn('guestPreUnlock audio failed',e);}
@@ -1412,8 +1431,11 @@ function goHome(){
 
 /* ============ PLAY AGAIN（同じメンバーでロビーへ） ============ */
 async function playAgain(){
+  console.log('playAgain called, isHost:', G.isHost, 'roomDbId:', G.roomDbId, 'roomId:', G.roomId);
   stopMusic();
   if(G_playAgainPoller){clearInterval(G_playAgainPoller);G_playAgainPoller=null;}
+  if(G_resultPoller){clearInterval(G_resultPoller);G_resultPoller=null;}
+  stopPolling();
   G_resultShown=false;
   G.myVote='';
   G.isImposter=false;
@@ -1434,7 +1456,6 @@ async function playAgain(){
         normal_track_id:null,
         imposter_track_id:null
       })});
-      // 全メンバーの投票・インポスター情報もリセット
       await fetch(base+'/room_members?room_id=eq.'+G.roomDbId,{method:'PATCH',headers:hdrs,body:JSON.stringify({
         is_imposter:false,
         assigned_track_id:null,
@@ -1442,10 +1463,52 @@ async function playAgain(){
         is_done:false
       })});
     }catch(e){console.warn('playAgain reset error',e);}
+    G_lastStatus='waiting';
+    await openLobbyUI();
+    subscribeRoom();
+  } else {
+    // ゲストはまずロビーUIだけ表示し、ホストがリセットするまで待つ
+    G_lastStatus='result'; // resultのまま誤検知しないように維持
+    await openLobbyUI();
+    waitForHostReset();
   }
+}
 
-  // 全員（ホスト・ゲスト共通）：ロビー画面へ戻ってポーリング再開
-  await openLobby();
+// ゲスト用：ホストがstatusをwaitingに戻すまで監視
+let G_resetWaitPoller=null;
+function waitForHostReset(){
+  if(G_resetWaitPoller)clearInterval(G_resetWaitPoller);
+  G_resetWaitPoller=setInterval(async()=>{
+    try{
+      const base='https://orhtqozyagxipngaklsy.supabase.co/rest/v1';
+      const key='sb_publishable_zQiywE5uLylw4U42tz6u3A_Pb-XL2eS';
+      const headers={'apikey':key,'Authorization':'Bearer '+key};
+      const r=await fetch(base+'/rooms?select=status&id=eq.'+G.roomDbId,{headers});
+      const data=await r.json();
+      if(data[0]?.status==='waiting'){
+        clearInterval(G_resetWaitPoller);G_resetWaitPoller=null;
+        G_lastStatus='waiting';
+        await fetchMembers();
+        subscribeRoom();
+      }
+    }catch(e){console.warn('waitForHostReset error',e);}
+  },1000);
+}
+
+// ロビーのUI表示だけを行う（ポーリングは別途呼ぶ側で開始する）
+async function openLobbyUI(){
+  console.log('openLobbyUI called, roomId:', G.roomId, 'roomDbId:', G.roomDbId);
+  renderCodeChars(G.roomId);
+  await fetchMembers();
+  renderTrackOpts();
+  document.getElementById('l-host-area').style.display=G.isHost?'block':'none';
+  document.getElementById('l-guest-area').style.display=G.isHost?'none':'block';
+  const isIOS=/iPad|iPhone|iPod/.test(navigator.userAgent)&&!window.MSStream;
+  if(isIOS&&!window._iosUnlocked){
+    const banner=document.getElementById(G.isHost?'lobby-ios-banner-host':'lobby-ios-banner');
+    if(banner)banner.style.display='block';
+  }
+  show('s-lobby');
 }
 </script>
 </body>
