@@ -339,6 +339,9 @@ body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background:
           <div style="font-size:48px;">🎵</div>
           <div style="font-size:18px;font-weight:800;color:var(--text);" id="p-tap-title-g">あなたの曲</div>
           <div style="font-size:14px;color:var(--text2);animation:pulse 1.5s ease-in-out infinite;">ホストが再生を開始するまで待ってね...</div>
+          <button onclick="guestPreUnlock()" id="guest-unlock-btn" style="margin-top:8px;padding:10px 20px;background:rgba(255,45,120,0.12);color:var(--pink);border:1.5px solid rgba(255,45,120,0.35);border-radius:10px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;">
+            🔊 iPhoneの方はここをタップ（音声準備）
+          </button>
         </div>
         <!-- ③ 全員：カウントダウン画面（iOSはここでタップ） -->
         <div id="p-state-cd" style="display:none;flex-direction:column;align-items:center;gap:16px;">
@@ -421,7 +424,8 @@ body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background:
         <div class="result-list" id="r-rows"></div>
       </div>
 
-      <button class="btn btn-primary" onclick="goHome()" style="margin-top:4px;" id="r-again">🔄 もう一度あそぶ</button>
+      <button class="btn btn-primary" onclick="playAgain()" style="margin-top:4px;" id="r-again">🔄 もう一度あそぶ</button>
+      <button class="btn btn-secondary" onclick="goHome()" style="margin-top:10px;" id="r-exit">🏠 ホームに戻る</button>
       <div style="height:12px;"></div>
     </div>
 
@@ -452,39 +456,61 @@ document.addEventListener('DOMContentLoaded',function(){
 window._unlockedAudioEl=null;
 
 function initIOSAudio(){
+  console.log('initIOSAudio called');
   try{
     // AudioContext unlock
     const ctx=new(window.AudioContext||window.webkitAudioContext)();
     const buf=ctx.createBuffer(1,1,22050);
     const src=ctx.createBufferSource();
     src.buffer=buf;src.connect(ctx.destination);src.start(0);
-    ctx.resume().then(()=>{window._iosAudioCtx=ctx;});
+    ctx.resume().then(()=>{window._iosAudioCtx=ctx;console.log('AudioContext unlocked, state:',ctx.state);});
+  }catch(e){console.warn('AudioContext unlock failed',e);}
 
-    // HTML Audio要素もユーザー操作中にunlockしておく（iOS Safari対策）
-    // 無音の極小mp3データURIを再生→即一時停止することで、このAudio要素は
-    // 後でJSから自由にplay()できるようになる
-    const silentDataUri='data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4LjI5LjEwMAAAAAAAAAAAAAAA//tQxAADB8AhSmxhIIEVCSiJrDCAAAAAU6CACWQAAA0kYsAAAAA//tQxBaAAAOMABMBgAAAAA';
-    const audioEl=new Audio(silentDataUri);
+  try{
+    // HTML Audio要素をunlock（実際のSupabase Storage上の音源を使い、すぐpauseする）
+    // data URIではなく実ファイルを使うことでiOS Safariの厳格な制限を確実に回避
+    const audioEl=new Audio();
+    audioEl.crossOrigin='anonymous';
     audioEl.volume=0.01;
+    audioEl.src='https://orhtqozyagxipngaklsy.supabase.co/storage/v1/object/public/music/silence.mp3';
+    // ファイルが無くてもoncanplayや即時のplay()呼び出し自体がunlockに有効なケースが多いiOSのため、
+    // エラーでも握りつぶして処理を続ける
     const p=audioEl.play();
     if(p!==undefined){
       p.then(()=>{
         audioEl.pause();
+        audioEl.currentTime=0;
         window._unlockedAudioEl=audioEl;
-        console.log('iOS audio element unlocked');
-      }).catch(e=>console.warn('unlock play failed',e));
+        console.log('iOS audio element unlocked (file method)');
+      }).catch(e=>{
+        console.warn('unlock play failed (file), trying silent buffer fallback',e);
+        // フォールバック：1サンプルの無音WAVをBase64で生成（より小さく確実な形式）
+        try{
+          const wavBase64='data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+          const audioEl2=new Audio(wavBase64);
+          audioEl2.volume=0.01;
+          const p2=audioEl2.play();
+          if(p2!==undefined){
+            p2.then(()=>{
+              audioEl2.pause();
+              window._unlockedAudioEl=audioEl2;
+              console.log('iOS audio element unlocked (wav fallback)');
+            }).catch(e2=>console.warn('wav fallback also failed',e2));
+          }
+        }catch(e3){console.warn('wav fallback exception',e3);}
+      });
     }
+  }catch(e){console.warn('iOS audio element init failed',e);}
 
-    window._iosUnlocked=true;
-    ['ios-audio-banner','lobby-ios-banner','lobby-ios-banner-host'].forEach(id=>{
-      const el=document.getElementById(id);
-      if(el)el.style.display='none';
-    });
-    ['ios-audio-ok','lobby-ios-ok','lobby-ios-ok-host'].forEach(id=>{
-      const el=document.getElementById(id);
-      if(el){el.style.display='block';setTimeout(()=>el.style.display='none',2000);}
-    });
-  }catch(e){console.warn('iOS audio init failed',e);}
+  window._iosUnlocked=true;
+  ['ios-audio-banner','lobby-ios-banner','lobby-ios-banner-host'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el)el.style.display='none';
+  });
+  ['ios-audio-ok','lobby-ios-ok','lobby-ios-ok-host'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el){el.style.display='block';setTimeout(()=>el.style.display='none',2000);}
+  });
 }
 
 /* ============ SUPABASE ============ */
@@ -988,18 +1014,53 @@ function startPlaying(){
 }
 
 function tapToPlay(){
-  // ホストが押した瞬間に即座にDB更新→全員同時再生（カウントダウンなし）
+  // ユーザーのタップ操作の中で直接Audio再生する（iOS Safari対策の鉄則）
   const base='https://orhtqozyagxipngaklsy.supabase.co/rest/v1';
   const key='sb_publishable_zQiywE5uLylw4U42tz6u3A_Pb-XL2eS';
   const hdrs={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json','Prefer':'return=minimal'};
-  const playAt=new Date().toISOString(); // 今すぐ
+  const playAt=new Date().toISOString();
   fetch(base+'/rooms?id=eq.'+G.roomDbId,{method:'PATCH',headers:hdrs,body:JSON.stringify({play_at:playAt})});
-  // ホスト自身も即再生
+  // ホスト自身もタップ操作の中で即再生（これがユーザー操作コンテキスト内なのでiOSでも確実に動く）
   startMusicImmediate();
 }
 
 let G_musicWaitTimer=null;
 let G_sessionStartTime=0;
+
+function guestPreUnlock(){
+  console.log('guestPreUnlock called (user gesture)');
+  try{
+    const ctx=new(window.AudioContext||window.webkitAudioContext)();
+    const buf=ctx.createBuffer(1,1,22050);
+    const src=ctx.createBufferSource();
+    src.buffer=buf;src.connect(ctx.destination);src.start(0);
+    ctx.resume().then(()=>{window._iosAudioCtx=ctx;});
+  }catch(e){console.warn('guestPreUnlock ctx failed',e);}
+
+  try{
+    const audioEl=new Audio();
+    audioEl.crossOrigin='anonymous';
+    audioEl.volume=0.01;
+    // 自分が聴く予定の曲URLが既にわかっていればそれを使う（より確実）
+    const myUrl=(G.normalTrackUrl||G.imposterTrackUrl)||'';
+    if(myUrl)audioEl.src=myUrl;
+    const p=audioEl.play();
+    if(p!==undefined){
+      p.then(()=>{
+        audioEl.pause();
+        audioEl.currentTime=0;
+        window._unlockedAudioEl=audioEl;
+        console.log('guestPreUnlock: audio element unlocked successfully');
+        const btn=document.getElementById('guest-unlock-btn');
+        if(btn){btn.textContent='✅ 準備完了！';btn.disabled=true;}
+      }).catch(e=>{
+        console.warn('guestPreUnlock play failed',e);
+        const btn=document.getElementById('guest-unlock-btn');
+        if(btn)btn.textContent='⚠️ もう一度タップしてください';
+      });
+    }
+  }catch(e){console.warn('guestPreUnlock audio failed',e);}
+}
 
 function waitForHostPlay(){
   if(G_musicWaitTimer)clearInterval(G_musicWaitTimer);
@@ -1107,11 +1168,13 @@ function playMusic(){
 
     // iOSで事前unlockしたAudio要素があれば再利用（自動再生制限を回避）
     if(window._unlockedAudioEl){
+      console.log('Using pre-unlocked audio element');
       G.htmlAudio=window._unlockedAudioEl;
       G.htmlAudio.crossOrigin='anonymous';
       G.htmlAudio.src=url;
       G.htmlAudio.volume=1.0;
     } else {
+      console.log('No pre-unlocked element, creating new Audio (may fail on iOS)');
       G.htmlAudio=new Audio();
       G.htmlAudio.crossOrigin='anonymous';
       G.htmlAudio.preload='auto';
@@ -1311,6 +1374,28 @@ async function showResult(){
   const sorted=[...G.members].sort((a,b)=>(votes[b.userId]||0)-(votes[a.userId]||0));
   document.getElementById('r-rows').innerHTML=sorted.map(m=>`<div class="result-row ${m.isImposter?'imp-row':''} ${m.userId===topUid?'top-row':''}"><div class="res-av">${m.emoji}</div><div class="res-info"><div class="res-name">${m.name}${m.isImposter?' 🔴':''}</div><div class="res-track">${m.isImposter?(G.imposterTrackName||''):(G.normalTrackName||'')}</div></div><div class="res-votes">${votes[m.userId]||0}票</div></div>`).join('');
   show('s-result');
+  // ホストが「もう一度あそぶ」を押した時、ゲストも自動でロビーへ戻れるよう監視
+  startPlayAgainPoller();
+}
+
+let G_playAgainPoller=null;
+function startPlayAgainPoller(){
+  if(G_playAgainPoller)clearInterval(G_playAgainPoller);
+  G_playAgainPoller=setInterval(async()=>{
+    try{
+      const base='https://orhtqozyagxipngaklsy.supabase.co/rest/v1';
+      const key='sb_publishable_zQiywE5uLylw4U42tz6u3A_Pb-XL2eS';
+      const headers={'apikey':key,'Authorization':'Bearer '+key};
+      const r=await fetch(base+'/rooms?select=status&id=eq.'+G.roomDbId,{headers});
+      const data=await r.json();
+      if(data[0]?.status==='waiting'){
+        clearInterval(G_playAgainPoller);G_playAgainPoller=null;
+        G_resultShown=false;
+        G.myVote='';G.isImposter=false;
+        await openLobby();
+      }
+    }catch(e){}
+  },1500);
 }
 
 /* ============ HOME ============ */
@@ -1323,6 +1408,44 @@ function goHome(){
   document.getElementById('h-name').value='';const jn=document.getElementById('h-join-name');if(jn)jn.value='';
   document.getElementById('h-code').value='';
   show('s-home');
+}
+
+/* ============ PLAY AGAIN（同じメンバーでロビーへ） ============ */
+async function playAgain(){
+  stopMusic();
+  if(G_playAgainPoller){clearInterval(G_playAgainPoller);G_playAgainPoller=null;}
+  G_resultShown=false;
+  G.myVote='';
+  G.isImposter=false;
+  G.useDBTracks=true;
+  G.normalTrackUrl='';G.imposterTrackUrl='';G.normalTrackName='';G.imposterTrackName='';
+
+  const base='https://orhtqozyagxipngaklsy.supabase.co/rest/v1';
+  const key='sb_publishable_zQiywE5uLylw4U42tz6u3A_Pb-XL2eS';
+  const hdrs={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json','Prefer':'return=minimal'};
+
+  if(G.isHost){
+    // ホストだけがDBをリセット（waitingに戻す）
+    try{
+      await fetch(base+'/rooms?id=eq.'+G.roomDbId,{method:'PATCH',headers:hdrs,body:JSON.stringify({
+        status:'waiting',
+        play_at:null,
+        selected_category:null,
+        normal_track_id:null,
+        imposter_track_id:null
+      })});
+      // 全メンバーの投票・インポスター情報もリセット
+      await fetch(base+'/room_members?room_id=eq.'+G.roomDbId,{method:'PATCH',headers:hdrs,body:JSON.stringify({
+        is_imposter:false,
+        assigned_track_id:null,
+        vote_target_user_id:null,
+        is_done:false
+      })});
+    }catch(e){console.warn('playAgain reset error',e);}
+  }
+
+  // 全員（ホスト・ゲスト共通）：ロビー画面へ戻ってポーリング再開
+  await openLobby();
 }
 </script>
 </body>
