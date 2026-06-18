@@ -459,24 +459,40 @@ document.addEventListener('DOMContentLoaded',function(){
   }
 });
 
+window._unlockedAudioEl=null;
+
 function initIOSAudio(){
   try{
+    // AudioContext unlock
     const ctx=new(window.AudioContext||window.webkitAudioContext)();
     const buf=ctx.createBuffer(1,1,22050);
     const src=ctx.createBufferSource();
     src.buffer=buf;src.connect(ctx.destination);src.start(0);
-    ctx.resume().then(()=>{
-      window._iosAudioCtx=ctx;
-      window._iosUnlocked=true;
-      // 全ての有効化ボタンを非表示にしてOKを表示
-      ['ios-audio-banner','lobby-ios-banner','lobby-ios-banner-host'].forEach(id=>{
-        const el=document.getElementById(id);
-        if(el)el.style.display='none';
-      });
-      ['ios-audio-ok','lobby-ios-ok','lobby-ios-ok-host'].forEach(id=>{
-        const el=document.getElementById(id);
-        if(el){el.style.display='block';setTimeout(()=>el.style.display='none',2000);}
-      });
+    ctx.resume().then(()=>{window._iosAudioCtx=ctx;});
+
+    // HTML Audio要素もユーザー操作中にunlockしておく（iOS Safari対策）
+    // 無音の極小mp3データURIを再生→即一時停止することで、このAudio要素は
+    // 後でJSから自由にplay()できるようになる
+    const silentDataUri='data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4LjI5LjEwMAAAAAAAAAAAAAAA//tQxAADB8AhSmxhIIEVCSiJrDCAAAAAU6CACWQAAA0kYsAAAAA//tQxBaAAAOMABMBgAAAAA';
+    const audioEl=new Audio(silentDataUri);
+    audioEl.volume=0.01;
+    const p=audioEl.play();
+    if(p!==undefined){
+      p.then(()=>{
+        audioEl.pause();
+        window._unlockedAudioEl=audioEl;
+        console.log('iOS audio element unlocked');
+      }).catch(e=>console.warn('unlock play failed',e));
+    }
+
+    window._iosUnlocked=true;
+    ['ios-audio-banner','lobby-ios-banner','lobby-ios-banner-host'].forEach(id=>{
+      const el=document.getElementById(id);
+      if(el)el.style.display='none';
+    });
+    ['ios-audio-ok','lobby-ios-ok','lobby-ios-ok-host'].forEach(id=>{
+      const el=document.getElementById(id);
+      if(el){el.style.display='block';setTimeout(()=>el.style.display='none',2000);}
     });
   }catch(e){console.warn('iOS audio init failed',e);}
 }
@@ -1034,24 +1050,24 @@ function startPlaying(){
   document.getElementById('p-viz').innerHTML=Array.from({length:14},(_,i)=>`<div class="vbar" id="vb-${i}" style="height:4px;"></div>`).join('');
   show('s-playing');
 
+  G_musicAlreadyStarted=false;
   if(G.isHost){
-    // ホスト：再生ボタンを表示
     showOverlayState('host');
   } else {
-    // ゲスト：待機画面を表示してDBを監視
     showOverlayState('guest');
     waitForHostPlay();
   }
 }
 
 function tapToPlay(){
-  // ホストが押した → play_atをDBに保存（3秒後）→ カウントダウン開始
+  // ホストが押した瞬間に即座にDB更新→全員同時再生（カウントダウンなし）
   const base='https://orhtqozyagxipngaklsy.supabase.co/rest/v1';
   const key='sb_publishable_zQiywE5uLylw4U42tz6u3A_Pb-XL2eS';
   const hdrs={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json','Prefer':'return=minimal'};
-  const playAt=new Date(Date.now()+3500).toISOString();
+  const playAt=new Date().toISOString(); // 今すぐ
   fetch(base+'/rooms?id=eq.'+G.roomDbId,{method:'PATCH',headers:hdrs,body:JSON.stringify({play_at:playAt})});
-  startMusicCountdown(playAt);
+  // ホスト自身も即再生
+  startMusicImmediate();
 }
 
 let G_musicWaitTimer=null;
@@ -1073,14 +1089,14 @@ function waitForHostPlay(){
       if(playAt){
         const t=new Date(playAt).getTime();
         // セッション開始後のplay_atのみ有効（古いものを無視）
-        if(t>G_sessionStartTime&&t>Date.now()-500){
+        if(t>G_sessionStartTime){
           clearInterval(G_musicWaitTimer);
           G_musicWaitTimer=null;
-          startMusicCountdown(playAt);
+          startMusicImmediate();
         }
       }
     }catch(e){}
-  },300);
+  },200);
 }
 
 function unlockIOSAudio(){
@@ -1098,37 +1114,14 @@ function unlockIOSAudio(){
   }catch(e){}
 }
 
-function startMusicCountdown(playAtISO){
-  const playAt=new Date(playAtISO).getTime();
-  showOverlayState('cd');
-  // カウントダウン中はiOSボタン不要（ロビーで対応済み）
-  const iosBtn=document.getElementById('p-ios-tap');
-  if(iosBtn)iosBtn.style.display='none';
-
-  const numEl=document.getElementById('p-cd-num');
-  const msgEl=document.getElementById('p-cd-msg');
-  const labels={3:'3',2:'2',1:'1'};
-  let musicStarted=false;
-
-  const cdTimer=setInterval(()=>{
-    const remaining=playAt-Date.now();
-    if(remaining<=0){
-      clearInterval(cdTimer);
-      if(musicStarted)return;
-      musicStarted=true;
-      if(numEl)numEl.textContent='🎵';
-      if(msgEl)msgEl.textContent='スタート！';
-      const overlay=document.getElementById('p-tap-overlay');
-      if(overlay)overlay.style.display='none';
-      playMusic();
-      // startVoteTimerを少し遅らせて確実に実行
-      setTimeout(()=>startVoteTimer(),500);
-      return;
-    }
-    const secs=Math.ceil(remaining/1000);
-    if(numEl)numEl.textContent=secs<=3?(labels[secs]||String(secs)):String(secs);
-    if(msgEl)msgEl.textContent='';
-  },100);
+let G_musicAlreadyStarted=false;
+function startMusicImmediate(){
+  if(G_musicAlreadyStarted)return;
+  G_musicAlreadyStarted=true;
+  const overlay=document.getElementById('p-tap-overlay');
+  if(overlay)overlay.style.display='none';
+  playMusic();
+  setTimeout(()=>startVoteTimer(),300);
 }
 
 function startVoteTimer(){
@@ -1179,23 +1172,36 @@ function playMusic(){
     const url=G.isImposter?G.imposterTrackUrl:G.normalTrackUrl;
     console.log('Playing URL:', url, 'isImposter:', G.isImposter);
     if(!url){console.warn('No track URL - imposter:'+G.isImposter+' normalUrl:'+G.normalTrackUrl+' imposterUrl:'+G.imposterTrackUrl);return;}
-    G.htmlAudio=new Audio();
-    G.htmlAudio.crossOrigin='anonymous';
-    G.htmlAudio.preload='auto';
-    G.htmlAudio.src=url;
-    // 再生試行（Android/iOS両対応）
+
+    // iOSで事前unlockしたAudio要素があれば再利用（自動再生制限を回避）
+    if(window._unlockedAudioEl){
+      G.htmlAudio=window._unlockedAudioEl;
+      G.htmlAudio.crossOrigin='anonymous';
+      G.htmlAudio.src=url;
+      G.htmlAudio.volume=1.0;
+    } else {
+      G.htmlAudio=new Audio();
+      G.htmlAudio.crossOrigin='anonymous';
+      G.htmlAudio.preload='auto';
+      G.htmlAudio.src=url;
+    }
+
     const playPromise=G.htmlAudio.play();
     if(playPromise!==undefined){
       playPromise.then(()=>{
         console.log('Audio playing:', url);
       }).catch(e=>{
         console.warn('Audio play failed, retrying:', e);
-        // 再試行
         setTimeout(()=>{
           if(G.htmlAudio){
             G.htmlAudio.play().catch(e2=>console.warn('Retry failed:',e2));
           }
-        },500);
+        },300);
+        setTimeout(()=>{
+          if(G.htmlAudio&&G.htmlAudio.paused){
+            G.htmlAudio.play().catch(e3=>console.warn('2nd retry failed:',e3));
+          }
+        },800);
       });
     }
     // ビジュアライザーアニメーション
