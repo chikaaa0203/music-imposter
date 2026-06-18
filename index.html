@@ -321,17 +321,6 @@ body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background:
       <button class="btn btn-secondary" id="l-back" onclick="goHome()" style="margin-top:12px;">← ホームに戻る</button>
     </div>
 
-    <!-- COUNTDOWN -->
-    <div id="s-countdown" class="screen">
-      <div class="phase-dots"><div class="pdot done"></div><div class="pdot now"></div><div class="pdot"></div><div class="pdot"></div></div>
-      <div class="cd-wrap">
-        <div class="cd-label" id="cd-top">全員で一緒に聴こう！</div>
-        <div class="cd-num" id="cd-num">3</div>
-        <div class="cd-msg" id="cd-msg">準備して...</div>
-        <button id="cd-unlock" onclick="unlockAudio()" style="display:none;padding:12px 24px;background:var(--purple);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;margin-top:8px;">🔊 タップして音を有効化</button>
-      </div>
-    </div>
-
     <!-- PLAYING -->
     <div id="s-playing" class="screen">
       <div class="phase-dots"><div class="pdot done"></div><div class="pdot done"></div><div class="pdot now"></div><div class="pdot"></div></div>
@@ -450,6 +439,7 @@ body::before{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background:
 <script>
 /* ============ iOS AUDIO INIT ============ */
 window._iosUnlocked=false;
+console.log('Music Impostor build: v3.0-fix-2026-06-18');
 
 document.addEventListener('DOMContentLoaded',function(){
   const isIOS=/iPad|iPhone|iPod/.test(navigator.userAgent)&&!window.MSStream;
@@ -941,68 +931,6 @@ async function applyMyTrack(){
   }
 }
 
-/* ============ COUNTDOWN ============ */
-function unlockAudio(){
-  try{
-    if(!G.audioCtx||G.audioCtx.state==='closed'){
-      G.audioCtx=new(window.AudioContext||window.webkitAudioContext)();
-    }
-    if(G.audioCtx.state==='suspended'){G.audioCtx.resume();}
-    // 無音を鳴らしてiOSを起こす
-    const buf=G.audioCtx.createBuffer(1,1,22050);
-    const src=G.audioCtx.createBufferSource();
-    src.buffer=buf; src.connect(G.audioCtx.destination); src.start(0);
-    document.getElementById('cd-unlock').style.display='none';
-    document.getElementById('cd-unlock').textContent='🔊 準備完了！';
-  }catch(e){console.warn('audio unlock failed',e);}
-}
-
-function startCountdown(playAtISO){
-  show('s-countdown');
-
-  // AudioContext事前起動
-  try{
-    if(!G.audioCtx||G.audioCtx.state==='closed'){
-      G.audioCtx=new(window.AudioContext||window.webkitAudioContext)();
-    }
-    if(G.audioCtx.state==='suspended'){G.audioCtx.resume();}
-  }catch(e){}
-
-  // iOS検出 → タップボタン表示
-  const isIOS=/iPad|iPhone|iPod/.test(navigator.userAgent)&&!window.MSStream;
-  if(isIOS){
-    const btn=document.getElementById('cd-unlock');
-    if(btn)btn.style.display='block';
-  }
-
-  const numEl=document.getElementById('cd-num');
-  const msgEl=document.getElementById('cd-msg');
-
-  // play_atまでの残り時間を計算してカウントダウン表示
-  const playAt=playAtISO?new Date(playAtISO).getTime():Date.now()+3500;
-  G.playAt=playAt; // 後でplayMusicで使う
-
-  let started=false;
-  function updateCountdown(){
-    const remaining=playAt-Date.now();
-    if(remaining<=0){
-      if(!started){
-        started=true;
-        numEl.textContent='🎵';
-        msgEl.textContent='START!';
-        setTimeout(startPlaying,100);
-      }
-      return;
-    }
-    const secs=Math.ceil(remaining/1000);
-    if(secs>=3){numEl.textContent='3';msgEl.textContent='';}
-    else if(secs===2){numEl.textContent='2';msgEl.textContent='';}
-    else{numEl.textContent='1';msgEl.textContent='';}
-    setTimeout(updateCountdown,100);
-  }
-  updateCountdown();
-}
-
 /* ============ PLAYING ============ */
 async function forceGoVoting(){
   stopMusic();
@@ -1075,7 +1003,9 @@ let G_sessionStartTime=0;
 
 function waitForHostPlay(){
   if(G_musicWaitTimer)clearInterval(G_musicWaitTimer);
-  G_sessionStartTime=Date.now();
+  // セッション開始を少し過去にずらして、僅かなタイミングのズレでも確実に検知する
+  G_sessionStartTime=Date.now()-2000;
+  console.log('waitForHostPlay started, sessionStartTime:', G_sessionStartTime);
   G_musicWaitTimer=setInterval(async()=>{
     try{
       const base='https://orhtqozyagxipngaklsy.supabase.co/rest/v1';
@@ -1084,18 +1014,20 @@ function waitForHostPlay(){
       const r=await fetch(base+'/rooms?select=play_at,status&id=eq.'+G.roomDbId,{headers});
       const data=await r.json();
       const room=data[0];
-      if(!room||room.status!=='playing')return;
+      if(!room){console.warn('waitForHostPlay: room not found');return;}
+      if(room.status!=='playing'){console.log('waitForHostPlay: status is',room.status);return;}
       const playAt=room.play_at;
+      console.log('waitForHostPlay check, play_at:', playAt);
       if(playAt){
         const t=new Date(playAt).getTime();
-        // セッション開始後のplay_atのみ有効（古いものを無視）
         if(t>G_sessionStartTime){
+          console.log('waitForHostPlay: detected play_at, starting music');
           clearInterval(G_musicWaitTimer);
           G_musicWaitTimer=null;
           startMusicImmediate();
         }
       }
-    }catch(e){}
+    }catch(e){console.warn('waitForHostPlay error',e);}
   },200);
 }
 
@@ -1321,9 +1253,12 @@ async function doVote(){
   document.getElementById('v-btn').innerHTML=`<span class="spin-icon"></span>${L('vVoting')}`;
   const base='https://orhtqozyagxipngaklsy.supabase.co/rest/v1';
   const key='sb_publishable_zQiywE5uLylw4U42tz6u3A_Pb-XL2eS';
-  const headers={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json','Prefer':'return=minimal'};
+  const writeHeaders={'apikey':key,'Authorization':'Bearer '+key,'Content-Type':'application/json','Prefer':'return=minimal'};
+  const readHeaders={'apikey':key,'Authorization':'Bearer '+key};
+
   try{
-    await fetch(base+'/room_members?id=eq.'+G.myMemberId,{method:'PATCH',headers,body:JSON.stringify({vote_target_user_id:G.myVote})});
+    await fetch(base+'/room_members?id=eq.'+G.myMemberId,{method:'PATCH',headers:writeHeaders,body:JSON.stringify({vote_target_user_id:G.myVote})});
+    console.log('My vote saved:', G.myVote);
   }catch(e){console.warn('vote error',e);}
   document.getElementById('v-btn').textContent=L('vVoted');
 
@@ -1331,21 +1266,23 @@ async function doVote(){
   let voteCheckCount=0;
   const voteCheck=setInterval(async()=>{
     voteCheckCount++;
-    if(voteCheckCount>30){clearInterval(voteCheck);return;}
+    console.log('voteCheck attempt', voteCheckCount);
+    if(voteCheckCount>40){clearInterval(voteCheck);console.warn('voteCheck timeout - forcing result');showResult();return;}
     try{
-      const r=await fetch(base+'/room_members?select=vote_target_user_id&room_id=eq.'+G.roomDbId,{headers});
+      const r=await fetch(base+'/room_members?select=vote_target_user_id&room_id=eq.'+G.roomDbId,{headers:readHeaders});
       const members=await r.json();
+      console.log('vote status:', members);
       if(Array.isArray(members)&&members.length>0){
         const allVoted=members.every(m=>m.vote_target_user_id);
         if(allVoted){
+          console.log('All voted! Moving to result.');
           clearInterval(voteCheck);
-          // DB更新と自分の画面遷移を同時に
-          fetch(base+'/rooms?id=eq.'+G.roomDbId,{method:'PATCH',headers,body:JSON.stringify({status:'result'})});
+          fetch(base+'/rooms?id=eq.'+G.roomDbId,{method:'PATCH',headers:writeHeaders,body:JSON.stringify({status:'result'})});
           await showResult();
         }
       }
-    }catch(e){}
-  },2000);
+    }catch(e){console.warn('voteCheck error',e);}
+  },1500);
 }
 
 /* ============ RESULT ============ */
@@ -1370,9 +1307,9 @@ async function showResult(){
   statusEl.className='result-status '+(correct?'caught':'escaped');
   document.getElementById('r-imp-emoji').textContent=realImp?.emoji||'❓';
   document.getElementById('r-imp-name').textContent=realImp?.name||'---';
-  document.getElementById('r-imp-track').textContent=lang==='ja'?G.selTrack.il:G.selTrack.ilEn;
+  document.getElementById('r-imp-track').textContent=G.imposterTrackName||'';
   const sorted=[...G.members].sort((a,b)=>(votes[b.userId]||0)-(votes[a.userId]||0));
-  document.getElementById('r-rows').innerHTML=sorted.map(m=>`<div class="result-row ${m.isImposter?'imp-row':''} ${m.userId===topUid?'top-row':''}"><div class="res-av">${m.emoji}</div><div class="res-info"><div class="res-name">${m.name}${m.isImposter?' 🔴':''}</div><div class="res-track">${m.isImposter?(lang==='ja'?G.selTrack.il:G.selTrack.ilEn):(lang==='ja'?G.selTrack.nl:G.selTrack.nlEn)}</div></div><div class="res-votes">${votes[m.userId]||0}票</div></div>`).join('');
+  document.getElementById('r-rows').innerHTML=sorted.map(m=>`<div class="result-row ${m.isImposter?'imp-row':''} ${m.userId===topUid?'top-row':''}"><div class="res-av">${m.emoji}</div><div class="res-info"><div class="res-name">${m.name}${m.isImposter?' 🔴':''}</div><div class="res-track">${m.isImposter?(G.imposterTrackName||''):(G.normalTrackName||'')}</div></div><div class="res-votes">${votes[m.userId]||0}票</div></div>`).join('');
   show('s-result');
 }
 
